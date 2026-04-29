@@ -117,9 +117,9 @@ jobs:
               --password-stdin \
               oras://ghcr.io
 
-      - name: Build ARM64 SIF from Docker/OCI image
+      - name: Pull ARM64 Docker/OCI image as SIF
         run: |
-          apptainer build --arch arm64 "${SIF_FILE}" "docker://${IMAGE}:${TAG}"
+          apptainer pull --arch arm64 -F "${SIF_FILE}" "docker://${IMAGE}:${TAG}"
 
       - name: Push SIF to GHCR via ORAS
         run: |
