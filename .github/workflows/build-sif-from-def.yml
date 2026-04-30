@@ -1,0 +1,137 @@
+name: Build Apptainer SIF from def
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Model/package name, e.g. boltz2"
+        required: true
+        default: "boltz2"
+
+      def_file:
+        description: "Path to Apptainer definition file"
+        required: true
+        default: "models/boltz2/boltz2.def"
+
+      tag:
+        description: "Version tag, e.g. dev-arm64 or 0.1.0-arm64"
+        required: true
+        default: "dev-arm64"
+
+      test_command:
+        description: "Light smoke test inside the SIF"
+        required: true
+        default: "python --version"
+
+      push_latest:
+        description: "Also push latest-arm64"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-sif:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+
+    env:
+      MODEL: ${{ inputs.model }}
+      DEF_FILE: ${{ inputs.def_file }}
+      TAG: ${{ inputs.tag }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Prepare names
+        run: |
+          OWNER_LC="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          MODEL_LC="$(echo "${MODEL}" | tr '[:upper:]' '[:lower:]')"
+
+          echo "OWNER_LC=${OWNER_LC}" >> "$GITHUB_ENV"
+          echo "MODEL_LC=${MODEL_LC}" >> "$GITHUB_ENV"
+          echo "SIF_IMAGE=ghcr.io/${OWNER_LC}/${MODEL_LC}-sif" >> "$GITHUB_ENV"
+          echo "SIF_FILE=${MODEL_LC}_${TAG}.sif" >> "$GITHUB_ENV"
+
+      - name: Validate definition file exists
+        run: |
+          test -f "${DEF_FILE}"
+          echo "Building ${DEF_FILE}"
+
+      - name: Install Apptainer on ARM64 runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y software-properties-common
+          sudo add-apt-repository -y ppa:apptainer/ppa
+          sudo apt-get update
+          sudo apt-get install -y apptainer
+          apptainer --version
+
+      - name: Prepare Apptainer temp/cache directories
+        run: |
+          mkdir -p "${RUNNER_TEMP}/apptainer-tmp"
+          mkdir -p "${RUNNER_TEMP}/apptainer-cache"
+
+          echo "APPTAINER_TMPDIR=${RUNNER_TEMP}/apptainer-tmp" >> "$GITHUB_ENV"
+          echo "APPTAINER_CACHEDIR=${RUNNER_TEMP}/apptainer-cache" >> "$GITHUB_ENV"
+
+      - name: Optional GHCR login for private base images
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            sudo apptainer registry login \
+              --username "${{ github.actor }}" \
+              --password-stdin \
+              docker://ghcr.io
+
+      - name: Build SIF directly from def
+        run: |
+          sudo -E apptainer build -F "${SIF_FILE}" "${DEF_FILE}"
+
+      - name: Inspect SIF
+        run: |
+          apptainer inspect "${SIF_FILE}" || true
+          ls -lh "${SIF_FILE}"
+
+      - name: Smoke test SIF
+        run: |
+          apptainer exec "${SIF_FILE}" /bin/sh -lc '${{ inputs.test_command }}'
+
+      - name: Set up ORAS
+        uses: oras-project/setup-oras@v1
+        with:
+          version: 1.3.0
+
+      - name: Login to GHCR with ORAS
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            oras login ghcr.io \
+              -u "${{ github.actor }}" \
+              --password-stdin
+
+      - name: Push SIF to GHCR with ORAS
+        run: |
+          printf '{}' > sif-config.json
+
+          oras push --image-spec v1.0 \
+            --config sif-config.json:application/vnd.sylabs.sif.config.v1+json \
+            "${SIF_IMAGE}:${TAG}" \
+            "${SIF_FILE}:application/vnd.sylabs.sif.layer.v1.sif"
+
+      - name: Optionally push latest-arm64
+        if: ${{ inputs.push_latest }}
+        run: |
+          printf '{}' > sif-config.json
+
+          oras push --image-spec v1.0 \
+            --config sif-config.json:application/vnd.sylabs.sif.config.v1+json \
+            "${SIF_IMAGE}:latest-arm64" \
+            "${SIF_FILE}:application/vnd.sylabs.sif.layer.v1.sif"
+
+      - name: Print pull command
+        run: |
+          echo "Pull on the HPC with:"
+          echo "apptainer pull ${MODEL_LC}_${TAG}.sif oras://${SIF_IMAGE}:${TAG}"

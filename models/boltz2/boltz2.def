@@ -1,0 +1,26 @@
+Bootstrap: docker
+From: ubuntu:24.04
+
+%post
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        ca-certificates \
+        git \
+        wget
+
+    rm -rf /var/lib/apt/lists/*
+
+    python3 -m pip install --break-system-packages --no-cache-dir boltz
+
+%environment
+    export LC_ALL=C
+    export PATH=/usr/local/bin:$PATH
+
+%runscript
+    exec "$@"
+
+%labels
+    Author protein-containers
+    Description Boltz2 ARM64 Apptainer image
