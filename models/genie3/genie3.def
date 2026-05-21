@@ -1,0 +1,138 @@
+Bootstrap: docker
+From: ubuntu:22.04
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Genie 3 Apptainer image (aarch64 / ARM64) — generation stage.
+#
+# Genie 3 (aqlaboratory/genie3): de novo protein design by equivariantly
+# diffusing oriented residue clouds. This image builds the *generation*
+# stage only — unconditional generation and motif scaffolding via
+# `genie3 generate`.
+#
+# Scope — what is deliberately NOT installed:
+#   * ColabFold / AlphaFold / JAX and the bioconda alignment tools
+#     (hhsuite, mmseqs2, kalign2, foldseek) from the upstream setup.sh.
+#     Those drive Genie 3's *own* evaluation stage; bioconda has little to
+#     no aarch64 coverage and a native ARM build of that stack is not
+#     reliable. The generation workflow (src/genie3/generation/workflow.py)
+#     imports none of them — verified against upstream main.
+#   * In a staged benchmark, structure prediction and evaluation run as
+#     separate steps with their own containers, so Genie 3 only needs to
+#     emit backbones here.
+#
+# aarch64 notes:
+#   * genie3's setup.py hard-pins torch==2.7.1. The CUDA-linked aarch64
+#     wheel (torch-2.7.1+cu128-cp310-...-aarch64) comes from the cu128
+#     index; plain PyPI yields a CPU-only wheel that silently disables the
+#     GPU. A build-time smoke check asserts torch.version.cuda is not None.
+#   * torch's cu128 wheels bundle the CUDA + cuDNN userspace libraries, so
+#     a plain Ubuntu base is enough; `--nv` injects the host driver at run
+#     time. Ubuntu 22.04 ships Python 3.10, which genie3 targets.
+#
+# Pretrained weights (~0.7 GB) are baked in at build time from the public
+# HuggingFace repo `yeqinglin/genie3` (no auth needed), so runtime is fully
+# offline.
+#
+# Build:
+#   apptainer build genie3.sif models/genie3/genie3.def
+# ─────────────────────────────────────────────────────────────────────────────
+
+%environment
+    export LANG=C.UTF-8
+    export LC_ALL=C.UTF-8
+    export GENIE3_HOME=/opt/genie3
+    export HF_HOME=/opt/hf_cache
+    export HF_HUB_CACHE=/opt/hf_cache/hub
+    export PYTHONDONTWRITEBYTECODE=1
+    # Weights are baked in at build time; compute nodes (e.g. the JUPITER
+    # booster) have no internet. Keep any HuggingFace lookup offline so it
+    # uses local files instead of stalling on a reachability check.
+    export HF_HUB_OFFLINE=1
+    export TRANSFORMERS_OFFLINE=1
+
+%post
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    export PIP_NO_CACHE_DIR=1
+    export GENIE3_HOME=/opt/genie3
+    export HF_HOME=/opt/hf_cache
+    export HF_HUB_CACHE=/opt/hf_cache/hub
+
+    # ── System deps ───────────────────────────────────────────────────────
+    apt-get update && apt-get install -y --no-install-recommends \
+        bash ca-certificates curl git \
+        python3 python3-pip python3-venv python3-dev \
+        build-essential pkg-config \
+        libffi-dev libssl-dev zlib1g-dev
+    rm -rf /var/lib/apt/lists/*
+    ln -sf /usr/bin/python3 /usr/local/bin/python
+
+    pip install --upgrade pip setuptools wheel
+
+    # ── PyTorch (aarch64 + CUDA) ──────────────────────────────────────────
+    # genie3 hard-pins torch==2.7.1. Install the CUDA-linked aarch64 wheel
+    # explicitly from the cu128 index *first*, so the genie3 install below
+    # sees the requirement already satisfied and never pulls a CPU-only
+    # wheel from PyPI.
+    pip install --index-url https://download.pytorch.org/whl/cu128 \
+        torch==2.7.1
+
+    # ── Genie 3 (generation stage) ────────────────────────────────────────
+    # Clone the repo so the bundled examples/ configs and data/design/
+    # problem sets ship inside the image, then install the package. Its
+    # install_requires pulls tqdm, numpy, scipy, pandas, lightning,
+    # biopython, tensorboard, ml-collections, zstandard, wandb and
+    # huggingface_hub from PyPI.
+    git clone --depth 1 https://github.com/aqlaboratory/genie3.git "${GENIE3_HOME}"
+    pip install "${GENIE3_HOME}"
+
+    # ── Build-time smoke: fail here, not at runtime on the cluster ─────────
+    python - <<'PY'
+import torch
+assert torch.version.cuda is not None, (
+    f"torch {torch.__version__} is CPU-only — the cu128 aarch64 wheel was "
+    "not selected. Check the torch --index-url."
+)
+print(f"[smoke] torch {torch.__version__} built with cuda {torch.version.cuda}")
+import genie3
+print("[smoke] genie3 import ok")
+PY
+
+    # ── Bake pretrained weights (public HuggingFace repo, no token) ───────
+    # Mirrors upstream scripts/setup/download.sh --weights, which places
+    # files under <repo_root>/pretrained/. snapshot_download is used
+    # directly so the build does not depend on the huggingface-cli / hf
+    # entry-point naming, which has changed across huggingface_hub releases.
+    mkdir -p "${HF_HOME}"
+    python - <<PY
+from huggingface_hub import snapshot_download
+snapshot_download(
+    "yeqinglin/genie3",
+    allow_patterns=["pretrained/*"],
+    local_dir="${GENIE3_HOME}",
+)
+PY
+    python - <<PY
+import os
+p = os.path.join("${GENIE3_HOME}", "pretrained")
+assert os.path.isdir(p) and os.listdir(p), "pretrained/ weights missing after download"
+print("[smoke] weights baked:", sorted(os.listdir(p)))
+PY
+
+%runscript
+    exec genie3 "$@"
+
+%help
+    Genie 3 (generation stage) — aarch64 Apptainer image.
+
+    The CLI is the image's runscript, so `apptainer run` == `genie3`:
+      apptainer run --nv genie3.sif generate -c <CONFIG>
+      apptainer exec --nv genie3.sif genie3 --help
+
+    Bundled example configs reference paths relative to the repo root, so
+    run them from $GENIE3_HOME (/opt/genie3):
+      apptainer exec --nv genie3.sif sh -lc \
+        'cd $GENIE3_HOME && genie3 generate -c examples/unconditional/experiment.yaml'
+
+    Pretrained weights are baked in at $GENIE3_HOME/pretrained.
+    Add --nv on GPU nodes. ColabFold/AlphaFold evaluation is NOT included.

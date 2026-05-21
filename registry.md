@@ -37,6 +37,20 @@ apptainer pull esm3_0.1.0-arm64.sif oras://ghcr.io/ai4pdlab/esm3-sif:0.1.0-arm64
 apptainer exec esm3_0.1.0-arm64.sif python -c "from esm.models.esm3 import ESM3; print('esm3 image ok')"
 ```
 
+## Genie3
+
+De novo protein design by equivariant diffusion of oriented residue clouds
+([aqlaboratory/genie3](https://github.com/aqlaboratory/genie3)). Built from
+`genie3.def` only — no Docker/OCI image. **Generation stage only**; pretrained
+weights are baked in, so the container runs fully offline.
+
+Apptainer SIF:
+
+```bash
+apptainer pull genie3_0.1.0-arm64.sif oras://ghcr.io/ai4pdlab/genie3-sif:0.1.0-arm64
+apptainer exec --nv genie3_0.1.0-arm64.sif genie3 --help
+```
+
 ## LigandMPNN
 
 Docker/OCI image:
