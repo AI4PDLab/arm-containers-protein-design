@@ -24,6 +24,7 @@ arm-containers-protein-design/
 │   │   ├── Dockerfile
 │   │   └── README.md
 │   ├── esm3/                # def-only build; needs the HF_TOKEN_ESM3 secret
+│   ├── genie3/              # def-only build (generation stage)
 │   ├── ligandmpnn/
 │   ├── proteinmpnn/
 │   └── rfdiffusion/
