@@ -24,6 +24,19 @@ apptainer pull boltz2_0.1.0-arm64.sif oras://ghcr.io/ai4pdlab/boltz2-sif:0.1.0-a
 apptainer exec boltz2_0.1.0-arm64.sif boltz --help
 ```
 
+## ESM3
+
+Multimodal protein language model (EvolutionaryScale). Built from `esm3.def`
+only — no Docker/OCI image. The gated `esm3-open` checkpoint is baked in at
+build time, so the container runs fully offline.
+
+Apptainer SIF:
+
+```bash
+apptainer pull esm3_0.1.0-arm64.sif oras://ghcr.io/ai4pdlab/esm3-sif:0.1.0-arm64
+apptainer exec esm3_0.1.0-arm64.sif python -c "from esm.models.esm3 import ESM3; print('esm3 image ok')"
+```
+
 ## LigandMPNN
 
 Docker/OCI image:

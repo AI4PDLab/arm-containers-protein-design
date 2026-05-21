@@ -1,0 +1,123 @@
+Bootstrap: docker
+From: nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ESM3 Apptainer image (aarch64 / ARM64).
+#
+# Multimodal protein language model (EvolutionaryScale ESM3). Bakes the gated
+# esm3-open small checkpoint (~1.4B params) into the image's HuggingFace cache
+# at build time, so the container runs fully offline on compute nodes with no
+# internet (e.g. the JUPITER booster).
+#
+# aarch64-specific notes:
+#   * python3-dev + extra -dev libs so aarch64 source builds (biotite,
+#     biotraj) can compile their Cython extensions.
+#   * httpx added explicitly — esm.sdk.forge imports it at module load, but
+#     upstream esm 3.2.1 does not declare it as a runtime dep.
+#   * esm is pinned (not torch) — on aarch64 the pytorch.org/whl/cu121 index
+#     has no wheels, so the esm install pulls a newer torch + nvidia-*-cu13
+#     runtime wheels. Pinning torch==2.3.1 here yields a CPU-only wheel from
+#     PyPI, which silently disables the GPU. A build-time smoke check
+#     verifies the installed torch is actually CUDA-linked.
+#   * HF_TOKEN is required (not optional) — esm3-open is gated on HuggingFace.
+#     The build fails fast if the build-arg is empty.
+#
+# Build via GitHub Actions:
+#   The "Build Apptainer SIF from def" workflow passes the repo's HF_TOKEN
+#   secret to apptainer build as a build-arg automatically (the def file is
+#   detected as needing it). Just set the HF_TOKEN repo secret first.
+#
+# Build locally:
+#   export HF_TOKEN=hf_xxx
+#   apptainer build --build-arg HF_TOKEN="$HF_TOKEN" \
+#       esm3.sif models/esm3/esm3.def
+# ─────────────────────────────────────────────────────────────────────────────
+
+%arguments
+    HF_TOKEN=""
+
+%environment
+    export LANG=C.UTF-8
+    export LC_ALL=C.UTF-8
+    export HF_HOME=/opt/hf_cache
+    export HF_HUB_CACHE=/opt/hf_cache/hub
+    export ESM3_CHECKPOINT=esm3-open
+    export PYTHONDONTWRITEBYTECODE=1
+    # Runtime is fully offline: esm3-open weights are baked into the HF
+    # cache during %post, and compute nodes (e.g. JUPITER booster) have no
+    # internet. Force from_pretrained() to use the cache instead of stalling
+    # on a HuggingFace reachability check. %environment is sourced only at
+    # container runtime, so this does not affect the %post weight bake.
+    export HF_HUB_OFFLINE=1
+    export TRANSFORMERS_OFFLINE=1
+
+%post
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    export PIP_NO_CACHE_DIR=1
+    export HF_HOME=/opt/hf_cache
+    export HF_HUB_CACHE=/opt/hf_cache/hub
+
+    # ── System deps ────────────────────────────────────────────────────────
+    # Include every -dev lib Cython/C-ext source builds might touch on
+    # aarch64, so we don't discover missing headers one package at a time.
+    apt-get update && apt-get install -y --no-install-recommends \
+        bash ca-certificates curl git \
+        python3 python3-pip python3-venv python3-dev \
+        build-essential pkg-config \
+        libffi-dev libssl-dev zlib1g-dev
+    rm -rf /var/lib/apt/lists/*
+    ln -sf /usr/bin/python3 /usr/local/bin/python
+
+    # ── Python deps (single resolver call + constraints) ──────────────────
+    # Pin `esm` for API stability. We deliberately do not pin torch: on
+    # aarch64, esm pulls torch + nvidia-*-cu13 wheels as a CUDA-linked
+    # bundle; pinning torch to an older version yields a CPU wheel.
+    # --extra-index-url (not --index-url) so x86 can still resolve cu121
+    # wheels without blocking aarch64 which must fall back to PyPI.
+    cat > /tmp/constraints.txt <<'EOF'
+esm==3.2.1.post1
+httpx>=0.27
+EOF
+
+    pip install --upgrade pip
+    pip install -c /tmp/constraints.txt \
+        --extra-index-url https://download.pytorch.org/whl/cu121 \
+        esm==3.2.1.post1 \
+        httpx \
+        numpy \
+        biopython \
+        huggingface-hub
+
+    # ── Build-time smoke: fail here, not at runtime on the cluster ─────────
+    # torch.version.cuda is None when a CPU-only wheel was picked; that
+    # catches the aarch64 PyPI-fallback trap. We cannot check
+    # torch.cuda.is_available() here because %post runs without --nv, so
+    # device visibility is not guaranteed even on a GPU build host.
+    python - <<'PY'
+import torch, httpx
+assert torch.version.cuda is not None, (
+    f"torch {torch.__version__} is CPU-only. Rebuild with a CUDA-linked "
+    "wheel source — on aarch64, this usually means letting `esm` pull torch "
+    "transitively with nvidia-*-cu13 wheels (remove any torch pin)."
+)
+print(f"[smoke] torch {torch.__version__} built with cuda {torch.version.cuda}")
+from esm.models.esm3 import ESM3  # exercises esm.sdk.forge → httpx path
+print("[smoke] esm.models.esm3 import ok")
+PY
+
+    # ── HF auth + bake esm3-open weights ──────────────────────────────────
+    mkdir -p "${HF_HOME}"
+    if [ -z "{{HF_TOKEN}}" ]; then
+        echo "ERROR: HF_TOKEN build-arg is empty; esm3-open is gated on HF." >&2
+        echo "       Rebuild with:  apptainer build --build-arg HF_TOKEN=\$HF_TOKEN ..." >&2
+        exit 1
+    fi
+    huggingface-cli login --token "{{HF_TOKEN}}" --add-to-git-credential || true
+    python -c "from esm.models.esm3 import ESM3; ESM3.from_pretrained('esm3-open')"
+    rm -f /root/.cache/huggingface/token /opt/hf_cache/token || true
+
+    mkdir -p /workspace/input /workspace/output /workspace/driver
+
+%runscript
+    exec python -c "from esm.models.esm3 import ESM3; print('esm3 image ok')"
