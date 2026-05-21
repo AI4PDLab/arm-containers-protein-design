@@ -23,7 +23,7 @@ arm-containers-protein-design/
 │   │   ├── boltz2.def       # Apptainer definition file
 │   │   ├── Dockerfile
 │   │   └── README.md
-│   ├── esm3/                # def-only build; needs the HF_TOKEN secret
+│   ├── esm3/                # def-only build; needs the HF_TOKEN_ESM3 secret
 │   ├── ligandmpnn/
 │   ├── proteinmpnn/
 │   └── rfdiffusion/

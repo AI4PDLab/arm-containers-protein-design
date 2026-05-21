@@ -17,13 +17,13 @@ compute nodes with no internet (e.g. the JUPITER booster).
 ESM3 weights are **gated** on HuggingFace. The build needs a HuggingFace token:
 
 1. Accept the license at <https://huggingface.co/EvolutionaryScale/esm3-sm-open-v1>.
-2. Add the token as a repository secret named **`HF_TOKEN`**
+2. Add the token as a repository secret named **`HF_TOKEN_ESM3`**
    (Settings → Secrets and variables → Actions → New repository secret).
 
 The `Build Apptainer SIF from def` workflow detects that `esm3.def` references
-`HF_TOKEN` and passes the secret to `apptainer build` as a build-arg
-automatically. The token is used only at build time and is scrubbed from the
-image before it is finalised.
+`HF_TOKEN` and passes the `HF_TOKEN_ESM3` secret to `apptainer build` as the
+`HF_TOKEN` build-arg automatically. The token is used only at build time and
+is scrubbed from the image before it is finalised.
 
 ## Build via GitHub Actions
 

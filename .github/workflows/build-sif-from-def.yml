@@ -89,20 +89,21 @@ jobs:
 
       - name: Build SIF directly from def
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_TOKEN_ESM3: ${{ secrets.HF_TOKEN_ESM3 }}
         run: |
-          # Pass the HF_TOKEN repo secret as a build-arg only for def files
-          # that declare it (e.g. esm3.def, which bakes gated HuggingFace
-          # weights). Def files that don't reference HF_TOKEN are unaffected.
+          # Pass a HuggingFace token as the HF_TOKEN build-arg only for def
+          # files that declare it (e.g. esm3.def, which bakes gated HF
+          # weights). The token comes from the HF_TOKEN_ESM3 repo secret.
+          # Def files that don't reference HF_TOKEN are unaffected.
           BUILD_ARGS=()
           if grep -q 'HF_TOKEN' "${DEF_FILE}"; then
-            if [ -z "${HF_TOKEN:-}" ]; then
-              echo "ERROR: ${DEF_FILE} requires HF_TOKEN, but the HF_TOKEN repo secret is not set." >&2
+            if [ -z "${HF_TOKEN_ESM3:-}" ]; then
+              echo "ERROR: ${DEF_FILE} requires a HuggingFace token, but the HF_TOKEN_ESM3 repo secret is not set." >&2
               echo "       Add it under: Settings -> Secrets and variables -> Actions -> New repository secret." >&2
               exit 1
             fi
-            echo "${DEF_FILE} references HF_TOKEN — passing the repo secret as a build-arg."
-            BUILD_ARGS+=(--build-arg "HF_TOKEN=${HF_TOKEN}")
+            echo "${DEF_FILE} references HF_TOKEN — passing the HF_TOKEN_ESM3 secret as the HF_TOKEN build-arg."
+            BUILD_ARGS+=(--build-arg "HF_TOKEN=${HF_TOKEN_ESM3}")
           fi
           sudo -E apptainer build "${BUILD_ARGS[@]}" -F "${SIF_FILE}" "${DEF_FILE}"
 
