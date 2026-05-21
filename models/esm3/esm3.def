@@ -23,9 +23,9 @@ From: nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 #     The build fails fast if the build-arg is empty.
 #
 # Build via GitHub Actions:
-#   The "Build Apptainer SIF from def" workflow passes the repo's HF_TOKEN
-#   secret to apptainer build as a build-arg automatically (the def file is
-#   detected as needing it). Just set the HF_TOKEN repo secret first.
+#   The "Build Apptainer SIF from def" workflow passes the repo's
+#   HF_TOKEN_ESM3 secret to apptainer build as the HF_TOKEN build-arg
+#   automatically. Just set the HF_TOKEN_ESM3 repo secret first.
 #
 # Build locally:
 #   export HF_TOKEN=hf_xxx
