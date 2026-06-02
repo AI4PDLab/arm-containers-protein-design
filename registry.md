@@ -51,6 +51,23 @@ apptainer pull genie3_0.1.0-arm64.sif oras://ghcr.io/ai4pdlab/genie3-sif:0.1.0-a
 apptainer exec --nv genie3_0.1.0-arm64.sif genie3 --help
 ```
 
+## ProGen2
+
+Autoregressive protein language model
+([salesforce/progen](https://github.com/salesforce/progen)). Built from
+`progen2.def` only — no Docker/OCI image. One checkpoint (default
+`progen2-base`) is baked in from the public Google Cloud Storage bucket, so the
+container runs fully offline.
+
+Apptainer SIF:
+
+```bash
+apptainer pull progen2_0.1.0-arm64.sif oras://ghcr.io/ai4pdlab/progen2-sif:0.1.0-arm64
+apptainer run --nv progen2_0.1.0-arm64.sif sample \
+    --model progen2-base --t 0.8 --p 0.9 \
+    --max-length 256 --num-samples 2 --context "1"
+```
+
 ## LigandMPNN
 
 Docker/OCI image:

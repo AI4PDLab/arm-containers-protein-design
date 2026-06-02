@@ -1,0 +1,224 @@
+Bootstrap: docker
+From: ubuntu:22.04
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ProGen2 Apptainer image (aarch64 / ARM64).
+#
+# Autoregressive protein language model (salesforce/progen). Bakes one ProGen2
+# checkpoint into the image at build time from the public Google Cloud Storage
+# bucket (no auth needed), so the container runs fully offline on compute nodes
+# with no internet (e.g. the JUPITER booster).
+#
+# aarch64 notes:
+#   * Upstream pins torch==1.9.0+cu111, which has no aarch64 / GH200 wheel. We
+#     install a modern CUDA-linked aarch64 PyTorch wheel from the cu128 index
+#     instead; plain PyPI yields a CPU-only wheel that silently disables the
+#     GPU. A build-time smoke check asserts torch.version.cuda is not None.
+#   * torch's cu128 wheels bundle the CUDA + cuDNN userspace libraries, so a
+#     plain Ubuntu base is enough; `--nv` injects the host driver at run time.
+#     Ubuntu 22.04 ships Python 3.10.
+#   * transformers is kept at the upstream-expected 4.16.2 API, but tokenizers
+#     is bumped to 0.13.3 (a prebuilt aarch64 wheel) — transformers 4.16.2
+#     accepts tokenizers>=0.10.1,!=0.11.3 with no upper bound, so this resolves
+#     cleanly and avoids a source build on ARM.
+#
+# Default baked checkpoint:
+#   PROGEN2_MODEL=progen2-base, 764M parameters.
+#
+# To bake a different checkpoint, edit PROGEN2_MODEL in %environment and %post
+# before building:
+#   progen2-small   151M
+#   progen2-medium  764M
+#   progen2-oas     764M
+#   progen2-base    764M
+#   progen2-large   2.7B
+#   progen2-BFD90   2.7B
+#   progen2-xlarge  6.4B
+#
+# Build:
+#   apptainer build progen2.sif models/progen2/progen2.def
+#
+# Run sampling:
+#   apptainer run --nv progen2.sif sample \
+#       --model progen2-base --t 0.8 --p 0.9 \
+#       --max-length 256 --num-samples 2 --context "1"
+#
+# Or with helper command:
+#   apptainer exec --nv progen2.sif progen2-sample \
+#       --model progen2-base --t 0.8 --p 0.9 \
+#       --max-length 256 --num-samples 2 --context "1"
+# ─────────────────────────────────────────────────────────────────────────────
+
+%environment
+    export LANG=C.UTF-8
+    export LC_ALL=C.UTF-8
+    export PROGEN_HOME=/opt/progen
+    export PROGEN2_HOME=/opt/progen/progen2
+    export PROGEN2_MODEL=progen2-base
+    export PROGEN2_CHECKPOINTS=/opt/progen/progen2/checkpoints
+    export PYTHONPATH=/opt/progen/progen2:${PYTHONPATH}
+    export PYTHONDONTWRITEBYTECODE=1
+    export TOKENIZERS_PARALLELISM=false
+    # Compute nodes are often offline. The checkpoint is baked into the SIF.
+    export TRANSFORMERS_OFFLINE=1
+    export HF_HUB_OFFLINE=1
+
+%post
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    export PIP_NO_CACHE_DIR=1
+    export PROGEN_HOME=/opt/progen
+    export PROGEN2_HOME=/opt/progen/progen2
+    export PROGEN2_MODEL=progen2-base
+    export PROGEN2_CHECKPOINTS=/opt/progen/progen2/checkpoints
+
+    # -------------------------------------------------------------------------
+    # System dependencies
+    # -------------------------------------------------------------------------
+    apt-get update && apt-get install -y --no-install-recommends \
+        bash ca-certificates curl wget git tar \
+        python3 python3-pip python3-venv python3-dev \
+        build-essential pkg-config \
+        libffi-dev libssl-dev zlib1g-dev
+    rm -rf /var/lib/apt/lists/*
+    ln -sf /usr/bin/python3 /usr/local/bin/python
+
+    python3 -m pip install --upgrade pip setuptools wheel
+
+    # -------------------------------------------------------------------------
+    # PyTorch for JUPITER GH200 / aarch64
+    # -------------------------------------------------------------------------
+    # The cu128 PyTorch index provides CUDA-linked wheels. On JUPITER, --nv
+    # injects the host NVIDIA driver at runtime.
+    python3 -m pip install --index-url https://download.pytorch.org/whl/cu128 \
+        torch==2.7.1
+
+    # -------------------------------------------------------------------------
+    # ProGen2 Python dependencies
+    # -------------------------------------------------------------------------
+    # Upstream requirements are:
+    #   torch==1.9.0+cu111 transformers==4.16.2 tokenizers==0.10.3
+    # We keep the old Transformers API expected by the ProGen2 scripts, but use
+    # a newer Tokenizers wheel that is much friendlier on Python 3.10/aarch64
+    # while staying within the version range accepted by Transformers 4.16.2.
+    python3 -m pip install \
+        transformers==4.16.2 \
+        tokenizers==0.13.3
+
+    # -------------------------------------------------------------------------
+    # ProGen2 code
+    # -------------------------------------------------------------------------
+    git clone --depth 1 https://github.com/salesforce/progen.git "${PROGEN_HOME}"
+
+    # -------------------------------------------------------------------------
+    # Bake one checkpoint into the image
+    # -------------------------------------------------------------------------
+    mkdir -p "${PROGEN2_CHECKPOINTS}/${PROGEN2_MODEL}"
+    wget -O "/tmp/${PROGEN2_MODEL}.tar.gz" \
+        "https://storage.googleapis.com/sfr-progen-research/checkpoints/${PROGEN2_MODEL}.tar.gz"
+    tar -xzf "/tmp/${PROGEN2_MODEL}.tar.gz" \
+        -C "${PROGEN2_CHECKPOINTS}/${PROGEN2_MODEL}/"
+    rm -f "/tmp/${PROGEN2_MODEL}.tar.gz"
+
+    # -------------------------------------------------------------------------
+    # Helper commands
+    # -------------------------------------------------------------------------
+    cat > /usr/local/bin/progen2-sample <<'SH'
+#!/bin/sh
+set -e
+cd "${PROGEN2_HOME:-/opt/progen/progen2}"
+exec python3 sample.py "$@"
+SH
+    chmod 0755 /usr/local/bin/progen2-sample
+
+    cat > /usr/local/bin/progen2-likelihood <<'SH'
+#!/bin/sh
+set -e
+cd "${PROGEN2_HOME:-/opt/progen/progen2}"
+exec python3 likelihood.py "$@"
+SH
+    chmod 0755 /usr/local/bin/progen2-likelihood
+
+    # -------------------------------------------------------------------------
+    # Build-time smoke checks
+    # -------------------------------------------------------------------------
+    cd "${PROGEN2_HOME}"
+    python3 - <<'PY'
+import os
+import torch
+import transformers
+import tokenizers
+print(f"[smoke] torch={torch.__version__} cuda_build={torch.version.cuda}")
+assert torch.version.cuda is not None, "PyTorch build is CPU-only; check the cu128 index."
+print(f"[smoke] transformers={transformers.__version__}")
+print(f"[smoke] tokenizers={tokenizers.__version__}")
+from models.progen.modeling_progen import ProGenForCausalLM
+print("[smoke] ProGenForCausalLM import ok")
+root = os.environ.get("PROGEN2_HOME", "/opt/progen/progen2")
+model = os.environ.get("PROGEN2_MODEL", "progen2-base")
+ckpt = os.path.join(root, "checkpoints", model)
+assert os.path.isdir(ckpt), f"checkpoint directory missing: {ckpt}"
+assert os.path.isfile(os.path.join(root, "tokenizer.json")), "tokenizer.json missing"
+print("[smoke] checkpoint files:", sorted(os.listdir(ckpt))[:10])
+PY
+
+%runscript
+    set -e
+    cd "${PROGEN2_HOME:-/opt/progen/progen2}"
+
+    if [ "$#" -eq 0 ]; then
+        echo "ProGen2 image. Commands: sample, likelihood, bash, python3"
+        echo "Example: apptainer run --nv progen2.sif sample --model ${PROGEN2_MODEL:-progen2-base} --context 1 --max-length 256 --num-samples 2"
+        exit 0
+    fi
+
+    cmd="$1"
+    shift
+    case "${cmd}" in
+        sample)
+            exec python3 sample.py "$@"
+            ;;
+        likelihood)
+            exec python3 likelihood.py "$@"
+            ;;
+        bash|sh|python|python3)
+            exec "${cmd}" "$@"
+            ;;
+        *)
+            exec "${cmd}" "$@"
+            ;;
+    esac
+
+%help
+    ProGen2 Apptainer image for JUPITER / GH200 / aarch64.
+
+    Baked model:
+      $PROGEN2_MODEL, stored under $PROGEN2_CHECKPOINTS/$PROGEN2_MODEL
+
+    Build:
+      apptainer build progen2.sif models/progen2/progen2.def
+
+    Sample sequences:
+      apptainer run --nv progen2.sif sample \
+        --model progen2-base \
+        --t 0.8 --p 0.9 \
+        --max-length 256 \
+        --num-samples 2 \
+        --context "1"
+
+    Score log-likelihood:
+      apptainer run --nv progen2.sif likelihood \
+        --model progen2-base \
+        --context "1MSEQUENCEHERE2"
+
+    Helper commands:
+      apptainer exec --nv progen2.sif progen2-sample --help
+      apptainer exec --nv progen2.sif progen2-likelihood --help
+
+    Notes:
+      * Use --nv on GPU nodes.
+      * Run from the ProGen2 directory if you manually call sample.py or
+        likelihood.py, because those scripts expect tokenizer.json and the
+        checkpoints directory relative to the current working directory.
+      * To bake a different checkpoint, edit PROGEN2_MODEL in %environment and
+        %post before building.
