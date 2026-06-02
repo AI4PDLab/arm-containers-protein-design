@@ -220,5 +220,5 @@ PY
       * Run from the ProGen2 directory if you manually call sample.py or
         likelihood.py, because those scripts expect tokenizer.json and the
         checkpoints directory relative to the current working directory.
-      * To bake a different checkpoint, edit PROGEN2_MODEL in %environment and
-        %post before building.
+      * To bake a different checkpoint, edit the PROGEN2_MODEL value in the
+        environment and post sections before building.
