@@ -43,8 +43,9 @@ From: ubuntu:22.04
 #   $GENIE2_HOME first. The %runscript below cd's for you, so
 #   `apptainer run --nv genie2.sif genie/sample_scaffold.py …` also works.
 #
-# The pretrained checkpoint (epoch_30.pt, ~0.4 GB) is baked in at build time
-# from the public GitHub release, so runtime is fully offline.
+# The pretrained checkpoint (epoch=30.ckpt, ~0.19 GB) is baked in at build
+# time from the public GitHub v1.0.0 release (asset `epoch.30.ckpt`), so
+# runtime is fully offline.
 #
 # Build:
 #   apptainer build genie2.sif models/genie2/genie2.def
@@ -54,7 +55,7 @@ From: ubuntu:22.04
     export LANG=C.UTF-8
     export LC_ALL=C.UTF-8
     export GENIE2_HOME=/opt/genie2
-    export GENIE2_CHECKPOINT=/opt/genie2/results/base/checkpoints/epoch_30.pt
+    export GENIE2_CHECKPOINT=/opt/genie2/results/base/checkpoints/epoch=30.ckpt
     export PYTHONDONTWRITEBYTECODE=1
 
 %post
@@ -64,13 +65,11 @@ From: ubuntu:22.04
     export GENIE2_HOME=/opt/genie2
 
     # ── System deps ───────────────────────────────────────────────────────
-    # git-lfs is kept as a fallback path for the checkpoint download.
     apt-get update && apt-get install -y --no-install-recommends \
-        bash ca-certificates curl wget git git-lfs \
+        bash ca-certificates curl wget git \
         python3 python3-pip python3-venv python3-dev \
         build-essential pkg-config \
         libffi-dev libssl-dev zlib1g-dev
-    git lfs install
     rm -rf /var/lib/apt/lists/*
     ln -sf /usr/bin/python3 /usr/local/bin/python
 
@@ -118,16 +117,20 @@ print("[smoke] genie import + sample_scaffold.py present")
 PY
 
     # ── Bake the pretrained checkpoint (public GitHub release, no auth) ────
-    # sample_scaffold.py loads <rootdir>/<name>/checkpoints/epoch_<epoch>.pt,
-    # i.e. results/base/checkpoints/epoch_30.pt for --name base --epoch 30.
+    # load_pretrained_model() (genie/utils/model_io.py) loads exactly
+    #   <rootdir>/<name>/checkpoints/epoch=<epoch>.ckpt
+    # i.e. results/base/checkpoints/epoch=30.ckpt for --name base --epoch 30.
+    # The v1.0.0 release ships this weight as the asset `epoch.30.ckpt`
+    # (~0.19 GB, dotted name); rename it to the `epoch=30.ckpt` that the
+    # loader globs for. (The earlier `epoch_30.pt` URL/filename was wrong on
+    # both counts — no such release asset, and the loader never looks for a
+    # `.pt`, so the build died at the `test -s` guard.)
     mkdir -p "${GENIE2_HOME}/results/base/checkpoints"
-    wget -q "https://github.com/aqlaboratory/genie2/releases/download/v1.0.0/epoch_30.pt" \
-        -O "${GENIE2_HOME}/results/base/checkpoints/epoch_30.pt" \
-    || (echo "Release asset download failed, trying Git LFS..." \
-        && cd "${GENIE2_HOME}" \
-        && git lfs pull --include="results/base/checkpoints/epoch_30.pt")
-    test -s "${GENIE2_HOME}/results/base/checkpoints/epoch_30.pt"
-    echo "[smoke] checkpoint baked: $(du -h ${GENIE2_HOME}/results/base/checkpoints/epoch_30.pt | cut -f1)"
+    curl -fL --retry 3 --retry-delay 5 \
+        "https://github.com/aqlaboratory/genie2/releases/download/v1.0.0/epoch.30.ckpt" \
+        -o "${GENIE2_HOME}/results/base/checkpoints/epoch=30.ckpt"
+    test -s "${GENIE2_HOME}/results/base/checkpoints/epoch=30.ckpt"
+    echo "[smoke] checkpoint baked: $(du -h "${GENIE2_HOME}/results/base/checkpoints/epoch=30.ckpt" | cut -f1)"
 
 %runscript
     # Convenience entrypoint: runs from the repo root so relative paths
@@ -151,5 +154,5 @@ PY
       apptainer run --nv genie2.sif genie/sample_scaffold.py --name base ...
 
     Pretrained weights are baked in at $GENIE2_CHECKPOINT
-    (/opt/genie2/results/base/checkpoints/epoch_30.pt). Add --nv on GPU nodes.
+    (/opt/genie2/results/base/checkpoints/epoch=30.ckpt). Add --nv on GPU nodes.
     Evaluation/structure-prediction tooling is NOT included.
