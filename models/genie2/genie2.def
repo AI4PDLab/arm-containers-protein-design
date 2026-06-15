@@ -1,0 +1,155 @@
+Bootstrap: docker
+From: ubuntu:22.04
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Genie 2 Apptainer image (aarch64 / ARM64) — generation / motif-scaffolding.
+#
+# Genie 2 (aqlaboratory/genie2): de novo protein backbone design and motif
+# scaffolding by SE(3)-equivariant diffusion. This image builds only the
+# *generation* stage — `genie/sample_scaffold.py` — which is what the Stroma
+# benchmark drives (REMARK-999-annotated PDB in → scaffold backbones out).
+#
+# Scope — deliberately NOT installed:
+#   * Genie 2's own evaluation stack (ColabFold / TM-score tooling, bioconda
+#     alignment tools). bioconda has poor aarch64 coverage and a native ARM
+#     build is unreliable; in the staged benchmark, structure prediction and
+#     evaluation run as separate containers, so Genie 2 only emits backbones.
+#
+# aarch64 + CUDA notes (this is what the old configs/arm/genie2.def got wrong):
+#   * The upstream def installed `torch==2.3.0` from the cu121 index with a
+#     `|| pip install torch==2.3.0` fallback. On aarch64 the cu121 index has
+#     NO matching wheel, so the fallback silently pulls a CPU-only torch from
+#     PyPI → the model runs on CPU (or fails to see the GPU) on the JUPITER
+#     booster. Worse, Genie 2 pins torch in its requirements, so a naive
+#     `pip install -e .` would *downgrade* any good wheel back to that CPU one.
+#   * Fix (mirrors the working genie3 image): install the CUDA-linked aarch64
+#     wheel FIRST from the cu128 index (torch 2.7.1 — proven on JUPITER's
+#     Grace-Hopper / sm_90 nodes; the cu128 wheels bundle the CUDA + cuDNN
+#     userspace, so a plain ubuntu:22.04 base + `--nv` at runtime is enough),
+#     then strip torch from Genie 2's pins before installing it so the good
+#     wheel is preserved. A build-time smoke check asserts torch.version.cuda
+#     is not None — the build fails here, not silently on the cluster.
+#   * Ubuntu 22.04 ships Python 3.10, which Genie 2 targets. No conda: the
+#     genie2 env IS the image's system python, so Stroma's invocation
+#     `apptainer exec --nv genie2.sif python genie/sample_scaffold.py …`
+#     resolves `python` directly (no `conda run` wrapper needed).
+#
+# cwd caveat (operational, not a build issue):
+#   Stroma's run_genie2.sh apptainer path runs `python genie/sample_scaffold.py`
+#   with a *relative* script path, bypassing %runscript, so it only works if
+#   the container working directory is /opt/genie2. apptainer sets cwd to the
+#   host $PWD by default, which is NOT /opt/genie2. Pass `--pwd /opt/genie2`
+#   on that exec (recommended one-line fix in run_genie2.sh), or `cd` into
+#   $GENIE2_HOME first. The %runscript below cd's for you, so
+#   `apptainer run --nv genie2.sif genie/sample_scaffold.py …` also works.
+#
+# The pretrained checkpoint (epoch_30.pt, ~0.4 GB) is baked in at build time
+# from the public GitHub release, so runtime is fully offline.
+#
+# Build:
+#   apptainer build genie2.sif models/genie2/genie2.def
+# ─────────────────────────────────────────────────────────────────────────────
+
+%environment
+    export LANG=C.UTF-8
+    export LC_ALL=C.UTF-8
+    export GENIE2_HOME=/opt/genie2
+    export GENIE2_CHECKPOINT=/opt/genie2/results/base/checkpoints/epoch_30.pt
+    export PYTHONDONTWRITEBYTECODE=1
+
+%post
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    export PIP_NO_CACHE_DIR=1
+    export GENIE2_HOME=/opt/genie2
+
+    # ── System deps ───────────────────────────────────────────────────────
+    # git-lfs is kept as a fallback path for the checkpoint download.
+    apt-get update && apt-get install -y --no-install-recommends \
+        bash ca-certificates curl wget git git-lfs \
+        python3 python3-pip python3-venv python3-dev \
+        build-essential pkg-config \
+        libffi-dev libssl-dev zlib1g-dev
+    git lfs install
+    rm -rf /var/lib/apt/lists/*
+    ln -sf /usr/bin/python3 /usr/local/bin/python
+
+    pip install --upgrade pip setuptools wheel
+
+    # ── PyTorch (aarch64 + CUDA) — install FIRST so it wins ────────────────
+    pip install --index-url https://download.pytorch.org/whl/cu128 \
+        torch==2.7.1
+
+    # ── Genie 2 (generation stage) ────────────────────────────────────────
+    git clone --depth 1 https://github.com/aqlaboratory/genie2.git "${GENIE2_HOME}"
+    cd "${GENIE2_HOME}"
+
+    # Strip Genie 2's torch pin from every dependency surface so the cu128
+    # wheel installed above is NOT downgraded to a CPU-only PyPI wheel.
+    for f in requirements.txt setup.py setup.cfg pyproject.toml; do
+        [ -f "$f" ] && sed -i -E '/^[[:space:]]*["'"'"']?torch([<>=!~ ]|["'"'"']|$)/Id' "$f" || true
+    done
+
+    # Install Genie 2 and its remaining deps (numpy, scipy, pandas,
+    # pytorch-lightning, biopython, etc.) WITHOUT touching torch.
+    pip install -e . || pip install -r requirements.txt
+
+    # Belt-and-suspenders: if the install above still pulled/downgraded torch
+    # (e.g. a single-line install_requires the sed couldn't surgically edit),
+    # force the cu128 aarch64 wheel back. Idempotent when already correct.
+    pip install --force-reinstall --no-deps \
+        --index-url https://download.pytorch.org/whl/cu128 torch==2.7.1
+
+    # ── Build-time smoke: fail here, not on the cluster ───────────────────
+    python - <<'PY'
+import torch
+assert torch.version.cuda is not None, (
+    f"torch {torch.__version__} is CPU-only — the cu128 aarch64 wheel was "
+    "not selected (check the torch --index-url and the torch-pin stripping)."
+)
+print(f"[smoke] torch {torch.__version__} built with cuda {torch.version.cuda}")
+# Genie 2 runs as `python genie/sample_scaffold.py`; confirm the package and
+# the entry script import/resolve so a broken install is caught now.
+import importlib, os
+importlib.import_module("genie")
+assert os.path.isfile(os.path.join(os.environ["GENIE2_HOME"], "genie", "sample_scaffold.py")), \
+    "genie/sample_scaffold.py missing"
+print("[smoke] genie import + sample_scaffold.py present")
+PY
+
+    # ── Bake the pretrained checkpoint (public GitHub release, no auth) ────
+    # sample_scaffold.py loads <rootdir>/<name>/checkpoints/epoch_<epoch>.pt,
+    # i.e. results/base/checkpoints/epoch_30.pt for --name base --epoch 30.
+    mkdir -p "${GENIE2_HOME}/results/base/checkpoints"
+    wget -q "https://github.com/aqlaboratory/genie2/releases/download/v1.0.0/epoch_30.pt" \
+        -O "${GENIE2_HOME}/results/base/checkpoints/epoch_30.pt" \
+    || (echo "Release asset download failed, trying Git LFS..." \
+        && cd "${GENIE2_HOME}" \
+        && git lfs pull --include="results/base/checkpoints/epoch_30.pt")
+    test -s "${GENIE2_HOME}/results/base/checkpoints/epoch_30.pt"
+    echo "[smoke] checkpoint baked: $(du -h ${GENIE2_HOME}/results/base/checkpoints/epoch_30.pt | cut -f1)"
+
+%runscript
+    # Convenience entrypoint: runs from the repo root so relative paths
+    # (genie/sample_scaffold.py, examples/*) resolve.
+    #   apptainer run --nv genie2.sif genie/sample_scaffold.py --name base ...
+    cd /opt/genie2
+    exec python "$@"
+
+%help
+    Genie 2 (generation / motif-scaffolding stage) — aarch64 Apptainer image.
+
+    Stroma invokes it as (note --pwd, since the script path is relative):
+      apptainer exec --nv --pwd /opt/genie2 \
+        --bind <datadir>:/data:ro --bind <outdir>:/out genie2.sif \
+        python genie/sample_scaffold.py --name base --epoch 30 \
+          --scale 0.4 --strength 0 --rootdir /opt/genie2/results \
+          --outdir /out --datadir /data --motif_name MB-1 \
+          --num_samples 10 --batch_size 4 --num_devices 1
+
+    Or via the runscript (cd's into the repo for you):
+      apptainer run --nv genie2.sif genie/sample_scaffold.py --name base ...
+
+    Pretrained weights are baked in at $GENIE2_CHECKPOINT
+    (/opt/genie2/results/base/checkpoints/epoch_30.pt). Add --nv on GPU nodes.
+    Evaluation/structure-prediction tooling is NOT included.
